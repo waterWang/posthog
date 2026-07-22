@@ -323,6 +323,7 @@ export {
   type SessionStatus,
   sendableQueuePrefixLength,
   sessionSupportsNativeSteer,
+  sessionSupportsSideQuestion,
 } from "./sessions";
 export type {
   SignalReportOrderingField,
