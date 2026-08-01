@@ -1,4 +1,5 @@
--- Snapshot pinned to products/cohorts/backend/migrations/0010_cohort_bfr_observed_idx.py.
+-- Snapshot pinned to products/cohorts/backend/migrations/0010_cohort_bfr_observed_idx.py, the last
+-- migration that changed this DDL. 0011 alters only `marker_watch`'s help_text, which emits no SQL.
 -- External Team/Cohort foreign keys are omitted so the contract test stays schema-local.
 
 CREATE TABLE cohort_backfill_runs (
