@@ -28,6 +28,7 @@ from products.warehouse_sources.backend.models.external_data_schema import Exter
 from products.warehouse_sources.backend.models.oom_event import ExternalDataSchemaOOMEvent
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.core.repartition import (
     measure_partition_bytes,
+    select_coarsen_target,
     select_repartition_target,
 )
 from products.warehouse_sources.backend.temporal.data_imports.pipelines.pipeline_v3.load.metrics import (
@@ -38,6 +39,22 @@ if TYPE_CHECKING:
     from products.warehouse_sources.backend.models.external_data_source import ExternalDataSource
 
 WAREHOUSE_AUTO_REPARTITION_FLAG = "data-warehouse-auto-repartition"
+WAREHOUSE_AUTO_DEFRAGMENT_FLAG = "data-warehouse-auto-defragment"
+
+# Coarsening gates. The two directions deliberately don't meet: a table is split finer above the budget
+# and merged coarser only below an eighth of it, and a coarsen aims at half the budget. So a freshly
+# coarsened table has to double before the finer path can claim it, and a freshly split one has to
+# shrink eightfold before this path can. Without that gap the controller would hand tables back and
+# forth every cooldown.
+COARSEN_TRIGGER_DIVISOR = 8
+COARSEN_TARGET_DIVISOR = 2
+# Below this, fragmentation costs little and a rewrite isn't worth its own risk.
+COARSEN_MIN_PARTITIONS = 16
+# Let a layout prove itself over a few daily sync cycles before undoing it.
+COARSEN_MIN_LAYOUT_AGE_SECONDS = 7 * 24 * 60 * 60
+# Longer than the finer path's window: making partitions bigger is the one change that can cause the
+# failure it's meant to prevent, so it takes a longer clean run to justify than a split does.
+COARSEN_OOM_FREE_DAYS = 14
 
 # Don't repartition the same table more than once a day — the budget has headroom, so a table that
 # trips repeatedly should converge over a few daily cycles, not thrash every sync.
@@ -47,16 +64,25 @@ REPARTITION_COOLDOWN_SECONDS = 24 * 60 * 60
 # doesn't re-attempt the rewrite on every sync forever.
 MAX_REPARTITION_ATTEMPTS = 3
 
-# Worst-case assumed ratio between a partition's in-memory working set and its compressed at-rest
-# size — the amplification that justifies the oom_history trigger at all. When even this generous
-# multiple of the largest partition fits the budget, partition size can't be what's killing the
-# worker (heartbeat timeouts also come from slow merges, deploys, and pod churn), so repartitioning
-# finer can't help.
-OOM_WORKING_SET_AMPLIFICATION = 100
-
 
 def target_partition_bytes() -> int:
     return int(getattr(settings, "DATA_WAREHOUSE_TARGET_PARTITION_BYTES", 500_000_000))
+
+
+def min_splittable_partition_bytes() -> int:
+    """The smallest partition an OOM-triggered split is allowed to produce.
+
+    Derived from the coarsening threshold rather than set independently, so the two directions cannot
+    disagree about the same table: anything below this is a layout the coarsening path would want to
+    merge back together, and splitting into it would be undoing our own work.
+
+    This is what makes the OOM trigger safe to keep. The OOM signal cannot tell a real kill from a
+    deploy or an eviction, so it fires on tables whose partitions were never the problem; requiring the
+    result to stay above this floor means the trigger can only act where partition size is a plausible
+    cause at all. Splitting below it also multiplies per-partition merge commits, which slows the sync
+    that produced the timeouts in the first place.
+    """
+    return target_partition_bytes() // COARSEN_TRIGGER_DIVISOR
 
 
 def repartition_oom_threshold() -> int:
@@ -68,7 +94,15 @@ def repartition_oom_window_days() -> int:
 
 
 def is_auto_repartition_enabled(schema: ExternalDataSchema) -> bool:
-    """Evaluate the rollout flag for this schema.
+    return _is_flag_enabled(schema, WAREHOUSE_AUTO_REPARTITION_FLAG)
+
+
+def is_auto_defragment_enabled(schema: ExternalDataSchema) -> bool:
+    return _is_flag_enabled(schema, WAREHOUSE_AUTO_DEFRAGMENT_FLAG)
+
+
+def _is_flag_enabled(schema: ExternalDataSchema, flag: str) -> bool:
+    """Evaluate a rollout flag for this schema.
 
     `schema_id`, `team_id`, and `source_type` are passed as person properties so the flag can be
     released to a single table — set a release condition `schema_id = <id>` to dogfood the controller
@@ -83,7 +117,7 @@ def is_auto_repartition_enabled(schema: ExternalDataSchema) -> bool:
     try:
         return bool(
             posthoganalytics.feature_enabled(
-                WAREHOUSE_AUTO_REPARTITION_FLAG,
+                flag,
                 str(team.uuid),
                 groups={"organization": str(team.organization_id), "project": str(team.id)},
                 person_properties={
@@ -133,6 +167,118 @@ def _cooldown_seconds_remaining(schema: ExternalDataSchema) -> float:
     except (ValueError, TypeError):
         return 0.0
     return max(0.0, REPARTITION_COOLDOWN_SECONDS - (timezone.now() - last_dt).total_seconds())
+
+
+def _seconds_since_last_repartition(schema: ExternalDataSchema) -> float | None:
+    """Age of the current layout, or None when this controller never rewrote the table."""
+    last = schema.last_repartition_at
+    if not last:
+        return None
+    try:
+        last_dt = parser.parse(last)
+    except (ValueError, TypeError):
+        return None
+    return (timezone.now() - last_dt).total_seconds()
+
+
+async def maybe_flag_for_coarsening(
+    schema: ExternalDataSchema,
+    source: ExternalDataSource,
+    job: ExternalDataJob,
+    partition_bytes: dict[str | None, int],
+    recent_oom_count: int,
+    logger: FilteringBoundLogger,
+    *,
+    budget: int,
+    max_bytes: int,
+) -> None:
+    """Flag an over-fragmented table to be rebuilt into fewer, larger partitions.
+
+    The counterpart to the finer path, for tables that ended up split far below what memory safety
+    needs, most of them by that path reacting to failures partition size never caused. Thousands of
+    tiny partitions mean thousands of per-partition merge commits, which is its own way to make a sync
+    slow enough to look like the problem the split was meant to solve.
+
+    Every gate here is about only rewriting a table whose current layout is both clearly wasteful and
+    clearly safe to undo. Called from `maybe_flag_for_repartition`'s healthy branch, so a table needing
+    a finer layout never reaches it. Never raises (the caller swallows).
+    """
+    measured_partitions = len(partition_bytes)
+    if measured_partitions < COARSEN_MIN_PARTITIONS:
+        return
+    if max_bytes * COARSEN_TRIGGER_DIVISOR > budget:
+        return
+    # Any OOM history at all disqualifies coarsening: the memory-gated signal means this table really
+    # did run out of memory, and bigger partitions are the wrong direction for that.
+    if recent_oom_count > 0:
+        return
+    if schema.repartition_pending is not None or schema.repartition_swap is not None:
+        return
+    layout_age = _seconds_since_last_repartition(schema)
+    if layout_age is not None and layout_age < COARSEN_MIN_LAYOUT_AGE_SECONDS:
+        return
+
+    if not await asyncio.to_thread(is_auto_defragment_enabled, schema):
+        await logger.adebug(
+            f"repartition: table is over-fragmented but coarsening is disabled by feature flag "
+            f"schema_id={schema.id} max_partition_bytes={max_bytes} partition_count={measured_partitions}",
+            schema_id=str(schema.id),
+            max_partition_bytes=max_bytes,
+            partition_count=measured_partitions,
+        )
+        return
+
+    # The 7-day window the caller already checked can miss an OOM that a repartition has since reset,
+    # so re-ask over the longer window before making partitions bigger.
+    long_window_oom_count = await asyncio.to_thread(
+        ExternalDataSchemaOOMEvent.recent_count, schema, days=COARSEN_OOM_FREE_DAYS
+    )
+    if long_window_oom_count > 0:
+        return
+
+    target, reason = await asyncio.to_thread(
+        select_coarsen_target, schema, partition_bytes, budget // COARSEN_TARGET_DIVISOR
+    )
+    if target is None:
+        await logger.adebug(
+            f"repartition: table is over-fragmented but no coarser layout applies schema_id={schema.id} "
+            f"reason={reason} max_partition_bytes={max_bytes} partition_count={measured_partitions}",
+            schema_id=str(schema.id),
+            reason=reason,
+            max_partition_bytes=max_bytes,
+            partition_count=measured_partitions,
+        )
+        return
+
+    pending = {**target.to_dict(), "trigger_reason": "defragmentation", "attempts": 0}
+    await asyncio.to_thread(schema.set_repartition_pending, pending)
+
+    props = base_event_props(schema, source, str(job.id))
+    props.update(
+        {
+            "max_partition_bytes_before": max_bytes,
+            "trigger_reason": "defragmentation",
+            "measured_partition_count_before": measured_partitions,
+            "partition_mode_after": target.partition_mode or "auto",
+            "partition_format_after": target.partition_format,
+            "partition_count_after": target.partition_count,
+            "partition_size_after": target.partition_size,
+        }
+    )
+    await asyncio.to_thread(capture_repartition_event, "warehouse_repartition_flagged", props)
+    await logger.ainfo(
+        f"repartition: flagged for coarsening on the next run schema_id={schema.id} "
+        f"max_partition_bytes={max_bytes} partition_count={measured_partitions} "
+        f"target_mode={target.partition_mode} target_format={target.partition_format} "
+        f"target_count={target.partition_count} target_size={target.partition_size}",
+        schema_id=str(schema.id),
+        max_partition_bytes=max_bytes,
+        partition_count=measured_partitions,
+        target_mode=target.partition_mode,
+        target_format=target.partition_format,
+        target_count=target.partition_count,
+        target_size=target.partition_size,
+    )
 
 
 async def maybe_flag_for_repartition(
@@ -205,19 +351,28 @@ async def maybe_flag_for_repartition(
                 recent_oom_count=oom_count,
                 partition_count=len(partition_bytes),
             )
+            await maybe_flag_for_coarsening(
+                schema, source, job, partition_bytes, oom_count, logger, budget=budget, max_bytes=max_bytes
+            )
             return
 
-        # A tiny largest partition can't be the OOM cause: without this guard, oom_history drives the
-        # scheme finer tier by tier until it bottoms out (e.g. datetime at hour) and then emits a
-        # skipped event + exception on every cooldown expiry forever — while the extra partitions
-        # multiply per-partition merge commits, slowing the sync that produced the timeouts.
-        if not over_budget and max_bytes * OOM_WORKING_SET_AMPLIFICATION < budget:
+        # An OOM-triggered split targets roughly half the current largest partition (see `split_budget`
+        # below). Refuse when that result would fall under the floor: partition size cannot be what is
+        # killing a table whose partitions are already that small, and without this guard oom_history
+        # drives the scheme finer tier by tier until it bottoms out (e.g. datetime at hour) and then
+        # emits a skipped event plus an exception on every cooldown expiry forever.
+        split_budget = budget if over_budget else max(1, max_bytes // 2)
+        floor = min_splittable_partition_bytes()
+        if not over_budget and split_budget < floor:
             await logger.adebug(
-                f"repartition: OOM history present but largest partition is far under budget, "
-                f"partitioning is not the cause — leaving layout alone schema_id={schema.id} "
-                f"max_partition_bytes={max_bytes} budget_bytes={budget} recent_oom_count={oom_count}",
+                f"repartition: OOM history present but a split would produce partitions under the floor, "
+                f"so partitioning is not the cause, leaving layout alone schema_id={schema.id} "
+                f"max_partition_bytes={max_bytes} split_budget_bytes={split_budget} floor_bytes={floor} "
+                f"budget_bytes={budget} recent_oom_count={oom_count}",
                 schema_id=str(schema.id),
                 max_partition_bytes=max_bytes,
+                split_budget_bytes=split_budget,
+                floor_bytes=floor,
                 budget_bytes=budget,
                 recent_oom_count=oom_count,
             )
@@ -268,10 +423,10 @@ async def maybe_flag_for_repartition(
             )
             return
 
-        # OOM-triggered but within the size budget: the compressed size under-counted the working set,
-        # so target roughly half the current largest partition to force a meaningfully finer scheme
-        # (md5 grows buckets, numerical halves the row-size, datetime steps one tier finer).
-        split_budget = budget if over_budget else max(1, max_bytes // 2)
+        # `split_budget` was computed with the floor check above: an over-budget table targets the
+        # budget, while an OOM-triggered one targets roughly half its current largest partition to force
+        # a meaningfully finer scheme (md5 grows buckets, numerical halves the row-size, datetime steps
+        # one tier finer).
         target, reason = select_repartition_target(schema, partition_bytes, split_budget)
         if target is None:
             # Needs repartition but nothing finer to do (datetime at hour, numerical can't shrink, unpartitionable).
