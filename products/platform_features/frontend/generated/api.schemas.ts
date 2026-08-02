@@ -750,7 +750,8 @@ export interface ChangeRequestRejectApi {
 
 export interface CommentApi {
     readonly id: string
-    readonly created_by: UserBasicApi
+    readonly created_by: UserBasicApi | null
+    item_context?: unknown
     /** @nullable */
     deleted?: boolean | null
     mentions?: number[]
@@ -769,7 +770,6 @@ export interface CommentApi {
      * @nullable
      */
     item_id?: string | null
-    item_context?: unknown
     /** @maxLength 79 */
     scope: string
     /**
@@ -791,7 +791,8 @@ export interface PaginatedCommentListApi {
 
 export interface PatchedCommentApi {
     readonly id?: string
-    readonly created_by?: UserBasicApi
+    readonly created_by?: UserBasicApi | null
+    item_context?: unknown
     /** @nullable */
     deleted?: boolean | null
     mentions?: number[]
@@ -810,7 +811,6 @@ export interface PatchedCommentApi {
      * @nullable
      */
     item_id?: string | null
-    item_context?: unknown
     /** @maxLength 79 */
     scope?: string
     /**
@@ -1423,6 +1423,10 @@ export type CommentsListParams = {
      * @minLength 1
      */
     source_comment?: string
+    /**
+     * Owning task for task, task_artifact, and desktop_canvas comment scopes.
+     */
+    task_id?: string
 }
 
 export type CommentsListCompleted = (typeof CommentsListCompleted)[keyof typeof CommentsListCompleted]
