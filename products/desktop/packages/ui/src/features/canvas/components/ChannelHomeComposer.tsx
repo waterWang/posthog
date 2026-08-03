@@ -1,4 +1,6 @@
+import { FolderOpenIcon, GithubLogoIcon } from "@phosphor-icons/react";
 import { isValidConfigValue } from "@posthog/core/task-detail/configOptions";
+import { Button } from "@posthog/quill";
 import { ANALYTICS_EVENTS } from "@posthog/shared/analytics-events";
 import type { Task } from "@posthog/shared/domain-types";
 import { useQueryClient } from "@tanstack/react-query";
@@ -6,6 +8,7 @@ import { useNavigate } from "@tanstack/react-router";
 import {
   forwardRef,
   useCallback,
+  useEffect,
   useImperativeHandle,
   useRef,
   useState,
@@ -43,8 +46,10 @@ import { useGenerateFreeformCanvas } from "../hooks/useGenerateFreeformCanvas";
 import {
   normalizeChannelName,
   PERSONAL_CHANNEL_NAME,
+  useUpdateTaskChannelRepositories,
 } from "../hooks/useTaskChannels";
 import type { PendingKickoff } from "./ChannelFeedView";
+import { TaskRepositoryDialog } from "./TaskRepositoryDialog";
 
 export interface ChannelHomeComposerHandle {
   /** Drop a starter prompt into the editor and apply its mode, if any. */
@@ -58,6 +63,8 @@ interface ChannelHomeComposerProps {
   channelContext?: string;
   /** Backend channel UUID that will own the created task (its feed home). */
   backendChannelId?: string;
+  channelRepositories?: string[];
+  channelGithubIntegration?: number | null;
   onTaskCreated: (task: Task) => void;
   /** Post an optimistic kickoff to the feed the instant a submit is accepted. */
   onPendingStart: (kickoff: PendingKickoff) => void;
@@ -80,6 +87,8 @@ export const ChannelHomeComposer = forwardRef<
     channelName,
     channelContext,
     backendChannelId,
+    channelRepositories = [],
+    channelGithubIntegration = null,
     onTaskCreated,
     onPendingStart,
     onPendingEnd,
@@ -153,6 +162,20 @@ export const ChannelHomeComposer = forwardRef<
   const [selectedCloudEnvId, setSelectedCloudEnvId] = useState<string | null>(
     null,
   );
+  const [repositoryDialogOpen, setRepositoryDialogOpen] = useState(false);
+  const [taskRepositories, setTaskRepositories] = useState(channelRepositories);
+  const [taskGithubIntegration, setTaskGithubIntegration] = useState<
+    number | null
+  >(channelGithubIntegration);
+  const [taskFolder, setTaskFolder] = useState("");
+  const updateChannelRepositories = useUpdateTaskChannelRepositories();
+  const channelRepositoriesKey = channelRepositories.join("\n");
+  useEffect(() => {
+    setTaskRepositories(
+      channelRepositoriesKey ? channelRepositoriesKey.split("\n") : [],
+    );
+    setTaskGithubIntegration(channelGithubIntegration);
+  }, [channelRepositoriesKey, channelGithubIntegration]);
   const setWorkspaceMode = useCallback(
     (mode: WorkspaceMode) => {
       setWorkspaceModeState(mode);
@@ -292,7 +315,12 @@ export const ChannelHomeComposer = forwardRef<
   const { isCreatingTask, canSubmit, handleSubmit } = useTaskCreation({
     editorRef,
     sessionId,
-    selectedDirectory: "",
+    selectedDirectory: taskFolder,
+    repositories: workspaceMode === "cloud" ? taskRepositories : undefined,
+    githubIntegrationId:
+      workspaceMode === "cloud"
+        ? (taskGithubIntegration ?? undefined)
+        : undefined,
     workspaceMode,
     sandboxEnvironmentId:
       workspaceMode === "cloud" && selectedCloudEnvId
@@ -405,8 +433,52 @@ export const ChannelHomeComposer = forwardRef<
             size="1"
             disabled={isBusy}
           />
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={isBusy}
+            onClick={() => setRepositoryDialogOpen(true)}
+          >
+            {workspaceMode === "cloud" ? (
+              <GithubLogoIcon size={14} />
+            ) : (
+              <FolderOpenIcon size={14} />
+            )}
+            {workspaceMode === "cloud"
+              ? taskRepositories.length > 0
+                ? `${taskRepositories.length} ${taskRepositories.length === 1 ? "repository" : "repositories"}`
+                : "Add repository…"
+              : taskFolder
+                ? "Folder selected"
+                : "Select folder…"}
+          </Button>
         </div>
       )}
+
+      <TaskRepositoryDialog
+        open={repositoryDialogOpen}
+        onOpenChange={setRepositoryDialogOpen}
+        cloud={workspaceMode === "cloud"}
+        repositories={taskRepositories}
+        integrationId={taskGithubIntegration}
+        folder={taskFolder}
+        onApply={(selection) => {
+          setTaskRepositories(selection.repositories);
+          setTaskGithubIntegration(selection.integrationId);
+          setTaskFolder(selection.folder);
+          if (
+            selection.saveToSpace &&
+            backendChannelId &&
+            workspaceMode === "cloud"
+          ) {
+            updateChannelRepositories.mutate({
+              channelId: backendChannelId,
+              githubIntegration: selection.integrationId,
+              repositories: selection.repositories,
+            });
+          }
+        }}
+      />
 
       <PromptInput
         ref={editorRef}
