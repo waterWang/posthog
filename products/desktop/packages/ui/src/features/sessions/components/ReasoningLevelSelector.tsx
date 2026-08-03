@@ -21,7 +21,6 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
   DropdownMenuSeparator,
   DropdownMenuSub,
   DropdownMenuSubContent,
@@ -40,6 +39,10 @@ import {
 } from "@posthog/shared/domain-types";
 import { gateRestrictedModelPick } from "@posthog/ui/features/billing/modelGate";
 import { useFeatureFlag } from "@posthog/ui/features/feature-flags/useFeatureFlag";
+import {
+  type AgentHarness,
+  HarnessSubmenu,
+} from "@posthog/ui/features/sessions/components/HarnessSubmenu";
 import { ModelRadioItem } from "@posthog/ui/features/sessions/components/ModelRadioItem";
 import type { AgentAdapter } from "@posthog/ui/features/settings/settingsStore";
 import { AnimatePresence, motion } from "framer-motion";
@@ -52,11 +55,6 @@ import {
   type ReasoningLevelOption,
   ReasoningSliderFace,
 } from "./ReasoningLevelDropdown";
-
-const ADAPTER_LABELS: Record<AgentAdapter, string> = {
-  claude: "Claude Code",
-  codex: "Codex",
-};
 
 const ADAPTER_ICONS: Record<AgentAdapter, React.ReactNode> = {
   claude: <Robot size={14} weight="regular" />,
@@ -75,6 +73,8 @@ interface ReasoningLevelSelectorProps {
   onChange?: (value: string) => void;
   onModelChange?: (value: string) => void;
   onAdapterChange?: (adapter: AgentAdapter) => void;
+  onHarnessChange?: (harness: AgentHarness) => void;
+  includePiHarness?: boolean;
   onConfigOptionChange?: (configId: string, value: string) => void;
   disabled?: boolean;
   isLoading?: boolean;
@@ -133,6 +133,8 @@ export function ReasoningLevelSelector({
   onChange,
   onModelChange,
   onAdapterChange,
+  onHarnessChange,
+  includePiHarness,
   onConfigOptionChange,
   disabled,
   isLoading,
@@ -407,34 +409,30 @@ export function ReasoningLevelSelector({
                 transition={{ duration: 0.12, ease: "easeOut" }}
               >
                 {onNotch && <BackRow onClick={() => setAdvanced(false)} />}
-                {onAdapterChange && adapter && (
-                  <DropdownMenuSub>
-                    <DropdownMenuSubTrigger>
-                      <span>Harness</span>
-                      <span className="flex-1 text-right text-muted-foreground">
-                        {ADAPTER_LABELS[adapter]}
-                      </span>
-                    </DropdownMenuSubTrigger>
-                    <DropdownMenuSubContent>
-                      <DropdownMenuRadioGroup
-                        value={adapter}
-                        onValueChange={(value) => {
-                          if (value !== adapter) {
-                            selectAndClose(() =>
-                              onAdapterChange(value as AgentAdapter),
-                            );
-                          }
-                        }}
-                      >
-                        <DropdownMenuRadioItem value="claude">
-                          Claude Code
-                        </DropdownMenuRadioItem>
-                        <DropdownMenuRadioItem value="codex">
-                          Codex
-                        </DropdownMenuRadioItem>
-                      </DropdownMenuRadioGroup>
-                    </DropdownMenuSubContent>
-                  </DropdownMenuSub>
+                {adapter && (onAdapterChange || onHarnessChange) && (
+                  <HarnessSubmenu
+                    value={adapter}
+                    includePi={includePiHarness && !!onHarnessChange}
+                    onChange={(harness) => {
+                      if (harness === adapter) {
+                        return;
+                      }
+
+                      selectAndClose(() => {
+                        if (harness === "pi") {
+                          onHarnessChange?.(harness);
+                          return;
+                        }
+
+                        if (onHarnessChange) {
+                          onHarnessChange(harness);
+                          return;
+                        }
+
+                        onAdapterChange?.(harness);
+                      });
+                    }}
+                  />
                 )}
                 {modelSelect && (
                   <DropdownMenuSub>

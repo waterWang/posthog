@@ -73,12 +73,10 @@ import type { EditorHandle } from "../../message-editor/types";
 import { useAutoFocusOnTyping } from "../../message-editor/useAutoFocusOnTyping";
 import { resolveAndAttachDroppedFiles } from "../../message-editor/utils/persistFile";
 import { usePanelLayoutStore } from "../../panels/panelLayoutStore";
-import {
-  PiModelSelector,
-  PiThinkingLevelSelector,
-} from "../../pi-sessions/PiSessionControls";
+import { PiModelSelector } from "../../pi-sessions/PiSessionControls";
 import { usePiModelCatalog } from "../../pi-sessions/usePiModelCatalog";
 import { DropZoneOverlay } from "../../sessions/components/DropZoneOverlay";
+import type { AgentHarness } from "../../sessions/components/HarnessSubmenu";
 import { ReasoningLevelSelector } from "../../sessions/components/ReasoningLevelSelector";
 import { getCurrentModeFromConfigOptions } from "../../sessions/sessionStore";
 import {
@@ -96,7 +94,6 @@ import { usePreviewConfig } from "../hooks/usePreviewConfig";
 import { useTaskCreation } from "../hooks/useTaskCreation";
 import { useWarmTask } from "../hooks/useWarmTask";
 import { resolveWorkspaceModePreference } from "../hooks/workspaceModePreference";
-import { AgentRuntimeSelect } from "./AgentRuntimeSelect";
 import { CloudGithubMissingNotice } from "./CloudGithubMissingNotice";
 import { NewTaskSuggestions } from "./ContinueCliSessions";
 import {
@@ -349,8 +346,12 @@ export function TaskInput({
     }
   }, [mostRecentRepo?.path, selectedDirectory, setSelectedDirectory]);
 
-  const setAdapter = (newAdapter: AgentAdapter) =>
-    setLastUsedAdapter(newAdapter);
+  const setAdapter = useCallback(
+    (newAdapter: AgentAdapter) => {
+      setLastUsedAdapter(newAdapter);
+    },
+    [setLastUsedAdapter],
+  );
 
   const {
     repositories,
@@ -760,6 +761,7 @@ export function TaskInput({
   const currentPiModel =
     piModelCatalog.find((model) => model.id === selectedPiModelId) ??
     piModelCatalog.find((model) => model.id === lastUsedPiModel) ??
+    piModelCatalog.find((model) => model.isDefault) ??
     piModelCatalog[0];
   const piThinkingLevels = currentPiModel?.thinkingLevels ?? [];
   const currentPiThinkingLevel = piThinkingLevels.includes(
@@ -1066,6 +1068,19 @@ export function TaskInput({
     [sessionId, setLastUsedAgentRuntime],
   );
 
+  const handleHarnessChange = useCallback(
+    (harness: AgentHarness) => {
+      if (harness === "pi") {
+        handleRuntimeChange("pi");
+        return;
+      }
+
+      handleRuntimeChange("acp");
+      setAdapter(harness);
+    },
+    [handleRuntimeChange, setAdapter],
+  );
+
   const handlePiModelChange = useCallback(
     (model: PiModelSelection) => {
       setSelectedPiModelId(model.id);
@@ -1204,13 +1219,6 @@ export function TaskInput({
                 align="center"
                 className="absolute bottom-full left-0 mb-2 min-w-0"
               >
-                {piHarnessEnabled && (
-                  <AgentRuntimeSelect
-                    value={runtime}
-                    onChange={handleRuntimeChange}
-                    disabled={isCreatingTask}
-                  />
-                )}
                 <WorkspaceModeSelect
                   value={workspaceMode}
                   onChange={setWorkspaceMode}
@@ -1406,8 +1414,16 @@ export function TaskInput({
                       <PiModelSelector
                         models={piModelCatalog}
                         currentModel={currentPiModel}
+                        thinkingLevel={
+                          supportsPiThinking
+                            ? currentPiThinkingLevel
+                            : undefined
+                        }
+                        thinkingLevels={piThinkingLevels}
                         disabled={isCreatingTask || isPiConfigLoading}
                         onChange={handlePiModelChange}
+                        onThinkingLevelChange={handlePiThinkingLevelChange}
+                        onHarnessChange={handleHarnessChange}
                       />
                     ) : null
                   }
@@ -1419,16 +1435,7 @@ export function TaskInput({
                     />
                   }
                   reasoningSelector={
-                    autoresearchDraft ? null : runtime === "pi" ? (
-                      currentPiThinkingLevel && supportsPiThinking ? (
-                        <PiThinkingLevelSelector
-                          level={currentPiThinkingLevel}
-                          levels={piThinkingLevels}
-                          disabled={isCreatingTask || isPiConfigLoading}
-                          onChange={handlePiThinkingLevelChange}
-                        />
-                      ) : null
-                    ) : (
+                    autoresearchDraft || runtime === "pi" ? null : (
                       <ReasoningLevelSelector
                         thoughtOption={thoughtOption}
                         modelOption={modelOption}
@@ -1438,6 +1445,10 @@ export function TaskInput({
                         onChange={handleThoughtChange}
                         onModelChange={handleModelChange}
                         onAdapterChange={setAdapter}
+                        onHarnessChange={
+                          piHarnessEnabled ? handleHarnessChange : undefined
+                        }
+                        includePiHarness={piHarnessEnabled}
                         onConfigOptionChange={setConfigOption}
                         disabled={isCreatingTask}
                         isLoading={isPreviewLoading}
