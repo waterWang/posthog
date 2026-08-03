@@ -60,7 +60,7 @@ def _positive_int_env(name: str, default: int, logger: structlog.BoundLogger) ->
 # for steady-state run duration, not a hard bound: nothing caps how long a run takes, so a run
 # longer than the window can still strand a merge until the next full_scan (the planned per-run
 # watermark is the real guarantee). Lower it once per-run duration is reliably small. See the
-# block comment below for how the window relates to the schedule and squash cadence.
+# block comment below for how the window relates to the squash cadence.
 DEFAULT_OVERRIDES_LOOKBACK_HOURS = 6
 
 
@@ -76,20 +76,19 @@ DEFAULT_OVERRIDES_LOOKBACK_HOURS = 6
 # row replaces the stale one. cohort_membership then self-heals on the next calculation run,
 # whose FULL OUTER JOIN diff emits 'left' for the old person and 'entered' for the new one.
 #
-# The override row written at merge time is the invalidation signal: each scheduled run
-# picks up distinct_ids whose override landed within the lookback window
+# The override row written at merge time is the invalidation signal: a run picks up distinct_ids
+# whose override landed within the lookback window
 # (RECONCILE_PRECALCULATED_DATA_OVERRIDES_LOOKBACK_HOURS, default DEFAULT_OVERRIDES_LOOKBACK_HOURS)
-# and repairs just their rows, so the schedule can run at the realtime calculation cadence and a
-# merge is reconciled by the next calculation run instead of hours later. A `full_scan` input
-# ignores the window — use it for first-deploy remediation or after the workflow was down longer
-# than the lookback.
+# and repairs just their rows. A `full_scan` input ignores the window — use it for first-deploy
+# remediation, or whenever the gap since the last run exceeds the lookback.
 #
-# Timing constraints: the lookback must comfortably exceed the schedule interval (so no
-# merge falls between runs), and both must stay well inside the person-overrides squash
-# cadence (SQUASH_PERSON_OVERRIDES_SCHEDULE, weekly by default) — the squash folds
-# overrides into the events table and then DELETES the override rows, and
-# precalculated_events is not part of that squash, so any override this workflow never saw
-# becomes unrepairable except by an event backfill re-run.
+# This workflow has no schedule: it only runs when someone starts it. So the lookback is not a
+# guarantee of completeness — any override older than the window at the time of a non-full_scan run
+# is missed. Timing constraint that still holds: a repair must land inside the person-overrides
+# squash cadence (SQUASH_PERSON_OVERRIDES_SCHEDULE, weekly by default) — the squash folds overrides
+# into the events table and then DELETES the override rows, and precalculated_events is not part of
+# that squash, so any override this workflow never saw becomes unrepairable except by an event
+# backfill re-run.
 
 # Latest surviving mapping per overridden distinct_id; mirrors the HogQL
 # person_distinct_id_overrides lazy table (argmax_select with deleted_field="is_deleted").
