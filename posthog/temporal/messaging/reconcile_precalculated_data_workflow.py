@@ -79,15 +79,15 @@ DEFAULT_OVERRIDES_LOOKBACK_HOURS = 6
 # The override row written at merge time is the invalidation signal: a run picks up distinct_ids
 # whose override landed within the lookback window
 # (RECONCILE_PRECALCULATED_DATA_OVERRIDES_LOOKBACK_HOURS, default DEFAULT_OVERRIDES_LOOKBACK_HOURS)
-# and repairs just their rows. A `full_scan` input ignores the window — use it for first-deploy
+# and repairs just their rows. A `full_scan` input ignores the window. Use that for first-deploy
 # remediation, or whenever the gap since the last run exceeds the lookback.
 #
 # This workflow has no schedule: it only runs when someone starts it. So the lookback is not a
-# guarantee of completeness — any override older than the window at the time of a non-full_scan run
-# is missed. Timing constraint that still holds: a repair must land inside the person-overrides
-# squash cadence (SQUASH_PERSON_OVERRIDES_SCHEDULE, weekly by default) — the squash folds overrides
-# into the events table and then DELETES the override rows, and precalculated_events is not part of
-# that squash, so any override this workflow never saw becomes unrepairable except by an event
+# guarantee of completeness, because any override older than the window at the time of a
+# non-full_scan run is missed. Timing constraint that still holds: a repair must land inside the
+# person-overrides squash cadence (SQUASH_PERSON_OVERRIDES_SCHEDULE, weekly by default). That squash
+# folds overrides into the events table and then DELETES the override rows, and precalculated_events
+# is not part of it, so any override this workflow never saw becomes unrepairable except by an event
 # backfill re-run.
 
 # Latest surviving mapping per overridden distinct_id; mirrors the HogQL

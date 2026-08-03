@@ -641,7 +641,7 @@ async def cleanup_cohort_calculation_schedules(client: Client):
     """Delete the realtime cohort calculation and precalculated-data reconcile schedules.
 
     The workflows stay registered on the messaging worker, so a run can still be started by hand
-    (see posthog/management/commands/analyze_realtime_cohort_calculation.py) — only the automatic
+    (see posthog/management/commands/analyze_realtime_cohort_calculation.py). Only the automatic
     cadence is gone. In-flight executions finish on their own; deleting a schedule doesn't cancel them.
     """
     legacy_schedule_ids = [
