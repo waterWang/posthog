@@ -291,10 +291,7 @@ class RetentionFixedIntervalBaseQueryBuilder(RetentionBaseQueryBuilder):
         # Source-parameterized so the deferred same-data-warehouse-table collapse is a small follow-up.
         # For the events-only case the source is the events table.
         timestamp_field = ast.Field(chain=["timestamp"])
-        # Qualify the actor column against the events table. For group aggregation this is `$group_N`,
-        # which the ClickHouse analyzer only resolves as `events.$group_N` — an unqualified reference
-        # trips NotFoundColumnInBlock. Mirrors the legacy and rolling paths.
-        actor_field = ast.Field(chain=["events", self.aggregation_target_events_column])
+        actor_field = ast.Field(chain=[self.aggregation_target_events_column])
         start_of_interval_sql = self.query_date_range.get_start_of_interval_hogql(source=timestamp_field)
 
         two_arm = self._first_time_two_arm_scan()
