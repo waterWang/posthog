@@ -133,6 +133,10 @@ PR_READY_EMAIL_SENT_AT_STATE_KEY = "pr_ready_email_sent_at"
 PR_READY_EMAIL_PR_URL_STATE_KEY = "pr_ready_email_pr_url"
 
 
+class TaskClientProvenance(models.TextChoices):
+    POSTHOG_DESKTOP = "posthog_desktop", "PostHog Desktop"
+
+
 class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
     class Runtime(models.TextChoices):
         ACP = "acp", "ACP"
@@ -178,6 +182,13 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
     title_manually_set = models.BooleanField(default=False)
     description = models.TextField()
     origin_product = models.CharField(max_length=20, choices=OriginProduct)
+    client_provenance = models.CharField(
+        max_length=32,
+        choices=TaskClientProvenance,
+        null=True,
+        blank=True,
+        editable=False,
+    )
 
     # Repository configuration
     github_integration = models.ForeignKey(
@@ -555,6 +566,7 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
         custom_image_builder_id: str | None = None,
         custom_image_id: str | None = None,
         mcp_builtin_agent_key: MCPBuiltInAgentKey | None = None,
+        client_provenance: TaskClientProvenance | None = None,
     ) -> tuple["Task", dict[str, Any]]:
         """Create the Task row and assemble the initial run's `extra_state`.
 
@@ -585,6 +597,7 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
         task_stub = Task(
             team=team,
             origin_product=origin_product,
+            client_provenance=client_provenance,
             created_by=created_by,
             repository=repository,
             github_integration=github_integration,
@@ -637,6 +650,7 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
             title=title,
             description=description,
             origin_product=origin_product,
+            client_provenance=client_provenance,
             created_by=created_by,
             github_integration=github_integration,
             github_user_integration=github_user_integration,
@@ -777,6 +791,7 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
         model: str | None = None,
         initial_permission_mode: str | None = None,
         mcp_builtin_agent_key: MCPBuiltInAgentKey | None = None,
+        client_provenance: TaskClientProvenance | None = None,
     ) -> "Task":
         """Create the Task row without an initial run or workflow.
 
@@ -802,6 +817,7 @@ class Task(FileSystemSyncMixin, DeletedMetaFields, models.Model):
             model=model,
             initial_permission_mode=initial_permission_mode,
             mcp_builtin_agent_key=mcp_builtin_agent_key,
+            client_provenance=client_provenance,
         )
         return task
 
@@ -1405,6 +1421,13 @@ class Loop(ModelActivityMixin, TeamScopedRootMixin):
         choices=Task.OriginProduct.choices,
         default=Task.OriginProduct.USER_CREATED,
         help_text="Which product or flow created this loop.",
+    )
+    client_provenance = models.CharField(
+        max_length=32,
+        choices=TaskClientProvenance,
+        null=True,
+        blank=True,
+        editable=False,
     )
     last_run_at = models.DateTimeField(null=True, blank=True)
     last_run_status = models.CharField(max_length=32, null=True, blank=True)
@@ -2356,6 +2379,13 @@ class SandboxSession(TeamScopedRootMixin, UUIDModel):
         null=True,
         blank=True,
         help_text="Task origin at provision time, denormalized for per-origin aggregation",
+    )
+    client_provenance = models.CharField(
+        max_length=32,
+        choices=TaskClientProvenance,
+        null=True,
+        blank=True,
+        editable=False,
     )
     prewarmed = models.BooleanField(default=False, help_text="Sandbox was provisioned ahead of any user demand")
     vm_runtime = models.BooleanField(
