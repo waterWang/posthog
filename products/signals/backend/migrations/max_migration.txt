@@ -1,1 +1,1 @@
-0060_signalreportrefund_period_bounds
+0083_signalscoutconfig_auto_pause_exempt

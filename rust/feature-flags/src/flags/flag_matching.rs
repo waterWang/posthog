@@ -25,10 +25,11 @@ use crate::handler::with_canonical_log;
 use crate::metrics::consts::{
     DB_PERSON_AND_GROUP_PROPERTIES_READS_COUNTER, FLAG_BATCH_EVALUATION_COUNTER,
     FLAG_BATCH_EVALUATION_TIME, FLAG_BATCH_SIZE, FLAG_COHORT_SOURCE_COUNTER,
-    FLAG_DB_PROPERTIES_FETCH_TIME, FLAG_EVALUATE_ALL_CONDITIONS_TIME,
-    FLAG_EVALUATION_ERROR_COUNTER, FLAG_EVALUATION_TIME, FLAG_EXPERIENCE_CONTINUITY_OPTIMIZED,
-    FLAG_EXPERIENCE_CONTINUITY_REQUESTS_COUNTER, FLAG_GET_MATCH_TIME, FLAG_GROUP_CACHE_FETCH_TIME,
-    FLAG_GROUP_DB_FETCH_TIME, FLAG_HASH_KEY_PROCESSING_TIME, FLAG_HASH_KEY_WRITES_COUNTER,
+    FLAG_CONDITION_SKIPPED_COUNTER, FLAG_DB_PROPERTIES_FETCH_TIME,
+    FLAG_EVALUATE_ALL_CONDITIONS_TIME, FLAG_EVALUATION_ERROR_COUNTER, FLAG_EVALUATION_TIME,
+    FLAG_EXPERIENCE_CONTINUITY_OPTIMIZED, FLAG_EXPERIENCE_CONTINUITY_REQUESTS_COUNTER,
+    FLAG_GET_MATCH_TIME, FLAG_GROUP_CACHE_FETCH_TIME, FLAG_GROUP_DB_FETCH_TIME,
+    FLAG_HASH_KEY_PROCESSING_TIME, FLAG_HASH_KEY_WRITES_COUNTER,
     FLAG_REALTIME_COHORT_QUERY_ERROR_COUNTER, FLAG_REALTIME_COHORT_QUERY_TIME,
     PROPERTY_CACHE_HITS_COUNTER, PROPERTY_CACHE_MISSES_COUNTER,
 };
@@ -38,14 +39,14 @@ use crate::rayon_dispatcher::RayonDispatcher;
 use crate::utils::graph_utils::PrecomputedDependencyGraph;
 use anyhow::Result;
 use chrono_tz::Tz;
-use common_metrics::{histogram, inc, timing_guard};
+use common_metrics::{histogram, inc, timing_guard, timing_guard_high_precision};
 use common_types::collections::HashMapExt;
 use common_types::{PersonId, TeamId};
 use rayon::prelude::*;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
-use tracing::{error, instrument, warn};
+use tracing::{debug, error, instrument, warn};
 use uuid::Uuid;
 
 const DEFAULT_PARALLEL_EVAL_THRESHOLD: usize = 100;
@@ -1329,7 +1330,7 @@ impl FeatureFlagMatcher {
             let person_properties = self.get_person_properties(person_property_overrides)?;
 
             if let Some(v) = person_properties.get(&enrollment_key) {
-                let is_match = v == "true" || v == &Value::Bool(true);
+                let is_match = FlagFilters::is_enrolled(v);
                 let payload = self.get_matching_payload(None, flag);
                 return Ok(FeatureFlagMatch {
                     matches: is_match,
@@ -1383,12 +1384,17 @@ impl FeatureFlagMatcher {
                         .as_ref()
                         .is_none_or(|device_id| device_id.is_empty())
                 {
+                    inc(
+                        FLAG_CONDITION_SKIPPED_COUNTER,
+                        &[("reason".to_string(), "missing_device_id".to_string())],
+                        1,
+                    );
                     with_canonical_log(|log| {
-                        tracing::warn!(
+                        tracing::debug!(
                             flag_key = %flag.key,
                             team_id = %flag.team_id,
                             condition_index = %index,
-                            lib = log.lib,
+                            lib = log.lib.as_deref(),
                             lib_version = log.lib_version.as_deref(),
                             "Person condition uses device_id bucketing but no device_id provided, skipping"
                         );
@@ -1425,7 +1431,12 @@ impl FeatureFlagMatcher {
                         _ => false,
                     });
                 if !has_group_key {
-                    warn!(
+                    inc(
+                        FLAG_CONDITION_SKIPPED_COUNTER,
+                        &[("reason".to_string(), "missing_group_type".to_string())],
+                        1,
+                    );
+                    debug!(
                         flag_key = %flag.key,
                         team_id = %flag.team_id,
                         condition_index = %index,
@@ -1794,7 +1805,7 @@ impl FeatureFlagMatcher {
         request_hash_key_override: &Option<String>,
     ) -> Result<(bool, Option<String>, FeatureFlagMatchReason), FlagError> {
         if let Some(holdout) = &flag.filters.holdout {
-            let percentage = holdout.exclusion_percentage.clamp(0.0, 100.0);
+            let percentage = holdout.exclusion_percentage_clamped();
 
             if percentage < 100.0
                 && self.get_holdout_hash(flag, None, request_hash_key_override)?
@@ -2119,7 +2130,10 @@ impl FeatureFlagMatcher {
                 self.flag_evaluation_state.get_person_uuid()
             {
                 let query_labels = [("team_id".to_string(), self.team_id.to_string())];
-                let realtime_timer = timing_guard(FLAG_REALTIME_COHORT_QUERY_TIME, &query_labels);
+                // High precision: cache hits complete in microseconds, and plain
+                // timing_guard truncates to integer ms, collapsing them all to 0.
+                let realtime_timer =
+                    timing_guard_high_precision(FLAG_REALTIME_COHORT_QUERY_TIME, &query_labels);
                 let realtime_start = std::time::Instant::now();
 
                 let result = self

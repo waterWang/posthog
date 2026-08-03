@@ -25,6 +25,7 @@ import IconLinear from 'public/services/linear.png'
 import IconLinkedIn from 'public/services/linkedin.png'
 import IconMailjet from 'public/services/mailjet.png'
 import IconMetaAds from 'public/services/meta-ads.png'
+import IconPardot from 'public/services/pardot.png'
 import IconPinterest from 'public/services/pinterest_ads.png'
 import IconPostgres from 'public/services/postgres.png'
 import IconReddit from 'public/services/reddit.png'
@@ -32,6 +33,7 @@ import IconS3Compatible from 'public/services/s3-compatible.png'
 import IconSalesforce from 'public/services/salesforce.png'
 import IconSlack from 'public/services/slack.png'
 import IconSnapchat from 'public/services/snapchat.png'
+import IconSnowflake from 'public/services/snowflake.png'
 import IconStripe from 'public/services/stripe.png'
 import IconTikTok from 'public/services/tiktok.png'
 import IconTwilio from 'public/services/twilio.png'
@@ -68,6 +70,7 @@ export const ICONS: Record<IntegrationKind, any> = {
     firebase: IconFirebase,
     jira: IconJira,
     'pinterest-ads': IconPinterest,
+    pardot: IconPardot,
     'customerio-app': IconCustomerIO,
     'customerio-webhook': IconCustomerIO,
     'customerio-track': IconCustomerIO,
@@ -75,6 +78,7 @@ export const ICONS: Record<IntegrationKind, any> = {
     postgresql: IconPostgres,
     'aws-s3': IconAwsS3,
     's3-compatible': IconS3Compatible,
+    snowflake: IconSnowflake,
 }
 
 // Brand marks that are solid black/monochrome on a transparent background — they vanish against a dark

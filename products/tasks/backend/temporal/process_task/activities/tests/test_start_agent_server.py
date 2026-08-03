@@ -137,7 +137,7 @@ def test_ensure_repository_on_disk_skips_repo_less_runs(mocker) -> None:
 
 @pytest.mark.django_db
 async def test_start_agent_server_uses_captured_sandbox_event_ingest_flag(mocker) -> None:
-    context = _context(sandbox_event_ingest_enabled=True)
+    context = _context(sandbox_event_ingest_enabled=True, state={"mcp_builtin_agent_key": "scout"})
     sandbox = mocker.Mock()
     sandbox.execute.return_value.stdout = ""
     sandbox.execute.return_value.stderr = ""
@@ -146,9 +146,17 @@ async def test_start_agent_server_uses_captured_sandbox_event_ingest_flag(mocker
         return_value=sandbox,
     )
     mocker.patch("products.tasks.backend.temporal.process_task.activities.start_agent_server.emit_agent_log")
-    mocker.patch(
+    task = mocker.Mock(
+        created_by_id=None,
+        team_id=1,
+        internal=True,
+        origin_product="support_reply",
+        mcp_builtin_agent_key="support",
+    )
+    task_queryset = mocker.patch(
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.Task.objects.select_related"
-    ).return_value.get.return_value = mocker.Mock(created_by_id=None)
+    ).return_value
+    task_queryset.get.return_value = task
     mocker.patch(
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.create_oauth_access_token_for_run",
         return_value="oauth-token",
@@ -157,10 +165,13 @@ async def test_start_agent_server_uses_captured_sandbox_event_ingest_flag(mocker
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.get_sandbox_ph_mcp_configs",
         return_value=[],
     )
-    mocker.patch(
-        "products.tasks.backend.temporal.process_task.activities.start_agent_server.TaskRun.objects.get",
-        return_value=mocker.Mock(),
+    get_user_mcp_configs = mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.get_user_mcp_server_configs",
+        return_value=[],
     )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.TaskRun.objects.filter",
+    ).return_value.first.return_value = mocker.Mock(state={}, imported_mcp_servers=None)
     create_event_ingest_token = mocker.patch(
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.create_sandbox_event_ingest_token",
         return_value="event-ingest-token",
@@ -178,8 +189,76 @@ async def test_start_agent_server_uses_captured_sandbox_event_ingest_flag(mocker
     assert result.sandbox_url == "https://sandbox.example"
     assert result.connect_token == "connect-token"
     create_event_ingest_token.assert_called_once()
+    assert create_event_ingest_token.call_args.kwargs == {"sandbox_id": "sandbox-id"}
+    task_queryset.get.assert_called_once_with(id="task-id")
+    get_user_mcp_configs.assert_called_once_with(
+        token="oauth-token",
+        team_id=1,
+        user_id=None,
+        include_personal=False,
+        interaction_origin=None,
+        allowed_installation_ids=None,
+        origin_product="support_reply",
+        task_agent_key="support",
+    )
     sandbox.start_agent_server.assert_called_once()
     assert sandbox.start_agent_server.call_args.kwargs["event_ingest_token"] == "event-ingest-token"
+
+
+async def test_start_agent_server_forwards_imported_and_relayed_mcp_servers(mocker) -> None:
+    context = _context()
+    sandbox = mocker.Mock()
+    sandbox.execute.return_value.stdout = ""
+    sandbox.execute.return_value.stderr = ""
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.Sandbox.get_by_id",
+        return_value=sandbox,
+    )
+    mocker.patch("products.tasks.backend.temporal.process_task.activities.start_agent_server.emit_agent_log")
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.Task.objects.select_related"
+    ).return_value.get.return_value = mocker.Mock(
+        created_by_id=None,
+        team_id=1,
+        internal=False,
+        origin_product="user_created",
+        mcp_builtin_agent_key=None,
+    )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.create_oauth_access_token_for_run",
+        return_value="oauth-token",
+    )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.get_sandbox_ph_mcp_configs",
+        return_value=[],
+    )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.TaskRun.objects.filter",
+    ).return_value.first.return_value = mocker.Mock(
+        state={},
+        imported_mcp_servers=[
+            {"type": "http", "name": "linear", "url": "https://mcp.linear.app", "headers": []},
+        ],
+        relayed_mcp_servers=[{"name": "slack"}],
+    )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.create_sandbox_event_ingest_token",
+        return_value="event-ingest-token",
+    )
+
+    await start_agent_server(
+        StartAgentServerInput(
+            context=context,
+            sandbox_id="sandbox-id",
+            sandbox_url="https://sandbox.example",
+            sandbox_connect_token="connect-token",
+        )
+    )
+
+    sandbox.start_agent_server.assert_called_once()
+    kwargs = sandbox.start_agent_server.call_args.kwargs
+    assert [config.name for config in kwargs["mcp_configs"]] == ["linear"]
+    assert kwargs["relayed_mcp_servers"] == ["slack"]
 
 
 async def test_start_agent_server_passes_initial_permission_mode(mocker) -> None:
@@ -194,7 +273,13 @@ async def test_start_agent_server_passes_initial_permission_mode(mocker) -> None
     mocker.patch("products.tasks.backend.temporal.process_task.activities.start_agent_server.emit_agent_log")
     mocker.patch(
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.Task.objects.select_related"
-    ).return_value.get.return_value = mocker.Mock(created_by_id=None)
+    ).return_value.get.return_value = mocker.Mock(
+        created_by_id=None,
+        team_id=1,
+        internal=False,
+        origin_product="user_created",
+        mcp_builtin_agent_key=None,
+    )
     mocker.patch(
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.create_oauth_access_token_for_run",
         return_value="oauth-token",
@@ -203,6 +288,9 @@ async def test_start_agent_server_passes_initial_permission_mode(mocker) -> None
         "products.tasks.backend.temporal.process_task.activities.start_agent_server.get_sandbox_ph_mcp_configs",
         return_value=[],
     )
+    mocker.patch(
+        "products.tasks.backend.temporal.process_task.activities.start_agent_server.TaskRun.objects.filter"
+    ).return_value.first.return_value = mocker.Mock(state={}, imported_mcp_servers=None)
 
     await start_agent_server(
         StartAgentServerInput(
